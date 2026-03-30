@@ -169,17 +169,27 @@ async def handle_message(event, say):
         last_response_time[channel] = time.time()
 
 
+async def _wait_for_service(name: str, check_fn, retries: int = 10, delay: float = 3.0) -> bool:
+    """Retry a health check function until it passes or retries are exhausted."""
+    for attempt in range(1, retries + 1):
+        if await check_fn():
+            return True
+        logger.info("Waiting for %s... (attempt %d/%d)", name, attempt, retries)
+        await asyncio.sleep(delay)
+    return False
+
+
 async def startup_checks() -> bool:
-    """Verify all dependencies are reachable. Returns True if all pass."""
+    """Verify all dependencies are reachable, with retries for services that are still starting."""
     passed = True
 
-    # Check llama.cpp
-    if not await llm_health_check():
+    # Check llama.cpp (up to 30s)
+    if not await _wait_for_service("llama.cpp", llm_health_check):
         logger.error("STARTUP FAILED: llama.cpp not reachable at configured URL")
         passed = False
 
-    # Check SearXNG
-    if not await search_health_check():
+    # Check SearXNG (up to 30s)
+    if not await _wait_for_service("SearXNG", search_health_check):
         logger.error("STARTUP FAILED: SearXNG not reachable at configured URL")
         passed = False
 

@@ -13,10 +13,11 @@ async def health_check() -> bool:
     """Check if SearXNG is reachable."""
     try:
         async with aiohttp.ClientSession() as session:
+            # Use the base URL — the search endpoint can fail while engines are still loading
             async with session.get(
-                f"{SEARXNG_URL}/search",
-                params={"q": "test", "format": "json"},
-                timeout=aiohttp.ClientTimeout(total=5),
+                SEARXNG_URL,
+                timeout=aiohttp.ClientTimeout(total=10),
+                allow_redirects=True,
             ) as resp:
                 return resp.status == 200
     except (aiohttp.ClientError, TimeoutError):

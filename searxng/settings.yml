@@ -7,3 +7,4 @@ search:
 
 server:
   limiter: false
+  secret_key: "bf57e60748e0c04517fd72e2656a00b8a0a9506eed66b8bb21a14c530c53c1cc"
