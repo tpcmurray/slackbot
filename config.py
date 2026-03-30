@@ -17,6 +17,7 @@ if _missing:
 DISCORD_BOT_TOKEN: str = os.environ["DISCORD_BOT_TOKEN"]
 LLAMA_CPP_URL: str = os.getenv("LLAMA_CPP_URL", "http://localhost:8080")
 SEARXNG_URL: str = os.getenv("SEARXNG_URL", "http://localhost:8888")
+KLIPY_APP_KEY: str = os.getenv("KLIPY_APP_KEY", "")
 BOT_NAME: str = os.getenv("BOT_NAME", "kibitz")
 CHANNEL_NAMES: list[str] = [
     c.strip() for c in os.getenv("CHANNEL_NAMES", "general").split(",")

@@ -18,6 +18,7 @@ from triage import run_triage
 from responder import generate_response
 from search import two_phase_response, extract_urls, fetch_url_text
 from vision import image_to_base64
+from gif import replace_gif_tags
 from llm import chat_completion, chat_completion_vision, health_check as llm_health_check
 from search import health_check as search_health_check
 
@@ -74,6 +75,22 @@ def _buffer_bot_response(channel_name: str, text: str):
         username=BOT_NAME,
         text=text,
     ))
+
+
+def _find_channel_by_name(name: str) -> discord.TextChannel | None:
+    """Find a channel by name across all guilds."""
+    for guild in client.guilds:
+        for channel in guild.text_channels:
+            if channel.name == name:
+                return channel
+    return None
+
+
+async def _send_response(channel: discord.TextChannel, text: str):
+    """Process GIF tags and send a message, splitting at 2000 chars if needed."""
+    text = await replace_gif_tags(text)
+    for i in range(0, len(text), 2000):
+        await channel.send(text[i:i+2000])
 
 
 @client.event
@@ -150,11 +167,8 @@ async def on_message(message: discord.Message):
     has_image = len(image_attachments) > 0
     image_urls = [a.url for a in image_attachments]
 
-    # Check for Discord mention
-    mentioned = client.user.mentioned_in(message)
-    # Also check for name mention in text
-    if BOT_NAME.lower() in text.lower():
-        mentioned = True
+    # Check for name mention (Discord @mention or text mention)
+    mentioned = client.user.mentioned_in(message) or BOT_NAME.lower() in text.lower()
 
     # Buffer the message
     buf = get_buffer(channel_name)
@@ -168,14 +182,25 @@ async def on_message(message: discord.Message):
         thread_ts=str(message.reference.message_id) if message.reference else None,
     ))
 
-    # Run triage
-    seconds_ago = time.time() - last_response_time.get(channel_name, 0)
-    triage_result = await run_triage(buf.recent(10), seconds_ago)
+    # Run triage (pure string matching — no LLM call)
+    triage_result = run_triage(buf.recent(10), mentioned, has_image)
 
     if not triage_result.should_respond:
         return
 
     logger.info("Triage: responding — %s", triage_result.reason)
+
+    # Resolve target channel (cross-posting support)
+    target = message.channel
+    target_name = channel_name
+    if triage_result.target_channel:
+        cross = _find_channel_by_name(triage_result.target_channel)
+        if cross:
+            target = cross
+            target_name = cross.name
+            logger.info("Cross-posting to #%s", target_name)
+        else:
+            logger.warning("Target channel #%s not found, posting in #%s", triage_result.target_channel, channel_name)
 
     # Handle image questions
     if triage_result.is_image_question and image_urls:
@@ -188,8 +213,8 @@ async def on_message(message: discord.Message):
                 system_prompt=personality,
             )
             if response:
-                await message.channel.send(response)
-                _buffer_bot_response(channel_name, response)
+                await _send_response(target, response)
+                _buffer_bot_response(target_name, response)
                 last_response_time[channel_name] = time.time()
             return
 
@@ -220,9 +245,8 @@ async def on_message(message: discord.Message):
             response = await chat_completion(messages)
             if response:
                 try:
-                    for i in range(0, len(response), 2000):
-                        await message.channel.send(response[i:i+2000])
-                    _buffer_bot_response(channel_name, response)
+                    await _send_response(target, response)
+                    _buffer_bot_response(target_name, response)
                     last_response_time[channel_name] = time.time()
                 except discord.HTTPException as e:
                     logger.error("Failed to send URL response: %s", e)
@@ -235,9 +259,8 @@ async def on_message(message: discord.Message):
 
         async def post(msg: str):
             try:
-                for i in range(0, len(msg), 2000):
-                    await message.channel.send(msg[i:i+2000])
-                _buffer_bot_response(channel_name, msg)
+                await _send_response(target, msg)
+                _buffer_bot_response(target_name, msg)
                 last_response_time[channel_name] = time.time()
             except discord.HTTPException as e:
                 logger.error("Failed to send search response: %s", e)
@@ -250,12 +273,11 @@ async def on_message(message: discord.Message):
     if response:
         logger.info("Sending response (%d chars): %s", len(response), response[:100])
         try:
-            for i in range(0, len(response), 2000):
-                await message.channel.send(response[i:i+2000])
-            _buffer_bot_response(channel_name, response)
+            await _send_response(target, response)
+            _buffer_bot_response(target_name, response)
             last_response_time[channel_name] = time.time()
         except discord.Forbidden:
-            logger.error("Bot lacks permission to send messages in #%s", channel_name)
+            logger.error("Bot lacks permission to send messages in #%s", target_name)
         except discord.HTTPException as e:
             logger.error("Failed to send message: %s", e)
     else:

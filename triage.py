@@ -1,26 +1,25 @@
-import json
 import logging
 import re
 from dataclasses import dataclass
 
 from buffer import BufferedMessage
-from config import BOT_NAME
-from llm import chat_completion
+from config import BOT_NAME, CHANNEL_NAMES
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_COOLDOWN_SECONDS = 300
-
-TRIAGE_SYSTEM_PROMPT = """You are the triage module for a Discord bot named {bot_name}.
-Given the recent conversation, decide if the bot should respond.
-
-Rules:
-- ONLY respond if someone mentions "{bot_name}" by name (or a close variation like "@{bot_name}")
-- NEVER respond unless "{bot_name}" appears in the message
-- No exceptions. No cooldown logic needed. Name mention is the only trigger.
-
-Reply with JSON only:
-{{"should_respond": true/false, "reason": "brief explanation", "needs_search": false, "is_image_question": false}}"""
+# Patterns for detecting intent from the message text
+_SEARCH_PATTERNS = re.compile(
+    r"\b(search|look up|google|find|what is|what are|who is|who are|when did|where is|how do|how does|tell me about|get me a link)\b",
+    re.IGNORECASE,
+)
+_IMAGE_PATTERNS = re.compile(
+    r"\b(what('s| is) (this|that|in this) (image|picture|photo|pic)|describe (this|the) (image|picture|photo)|what do you see)\b",
+    re.IGNORECASE,
+)
+_CHANNEL_PATTERN = re.compile(
+    r"\b(?:post|say|send|put|drop)\s+(?:.*?\s+)?(?:in|to)\s+#?(\w+)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -29,90 +28,50 @@ class TriageResult:
     reason: str = ""
     needs_search: bool = False
     is_image_question: bool = False
+    target_channel: str = ""
 
 
-def _format_conversation(messages: list[BufferedMessage]) -> str:
-    lines = []
-    for msg in messages:
-        prefix = f"[{msg.username}]"
-        if msg.has_image:
-            prefix += " (attached an image)"
-        lines.append(f"{prefix}: {msg.text}")
-    return "\n".join(lines)
-
-
-async def run_triage(
+def run_triage(
     recent_messages: list[BufferedMessage],
-    seconds_since_last_response: float,
-    cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
+    mentioned: bool,
+    has_image: bool,
 ) -> TriageResult:
-    """Tier 1: Quick triage to decide if the bot should respond."""
-    system_prompt = TRIAGE_SYSTEM_PROMPT.format(
-        bot_name=BOT_NAME,
-        seconds_ago=int(seconds_since_last_response),
-        cooldown_seconds=cooldown_seconds,
+    """Tier 1: Fast string-match triage — no LLM call needed."""
+    if not mentioned:
+        return TriageResult(reason="not mentioned")
+
+    if not recent_messages:
+        return TriageResult(should_respond=True, reason="mentioned (no context)")
+
+    last_msg = recent_messages[-1]
+    text = last_msg.text
+
+    # Detect cross-post target
+    target_channel = ""
+    channel_match = _CHANNEL_PATTERN.search(text)
+    if channel_match:
+        candidate = channel_match.group(1).lower()
+        if candidate in CHANNEL_NAMES:
+            target_channel = candidate
+
+    # Detect search intent
+    needs_search = bool(_SEARCH_PATTERNS.search(text))
+
+    # Detect image question
+    is_image_question = has_image and bool(_IMAGE_PATTERNS.search(text))
+
+    reason = "name mentioned"
+    if needs_search:
+        reason += " + search intent"
+    if is_image_question:
+        reason += " + image question"
+    if target_channel:
+        reason += f" + cross-post to #{target_channel}"
+
+    return TriageResult(
+        should_respond=True,
+        reason=reason,
+        needs_search=needs_search,
+        is_image_question=is_image_question,
+        target_channel=target_channel,
     )
-
-    conversation = _format_conversation(recent_messages)
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": conversation},
-    ]
-
-    response = await chat_completion(messages, temperature=0.1, max_tokens=512)
-
-    if not response:
-        logger.warning("Triage got empty LLM response")
-        return TriageResult()
-
-    logger.debug("Triage raw response: %s", response)
-
-    # Extract JSON from the response — handle code fences, truncation, etc.
-    cleaned = response.strip()
-
-    # Strip markdown code fences
-    if "```" in cleaned:
-        fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.DOTALL)
-        if fence_match:
-            cleaned = fence_match.group(1).strip()
-
-    # Find the JSON object starting with {
-    json_start = cleaned.find("{")
-    if json_start != -1:
-        cleaned = cleaned[json_start:]
-
-    # If JSON is truncated (no closing brace), try to close it
-    if cleaned.startswith("{") and "}" not in cleaned:
-        cleaned = cleaned + "}"
-
-    try:
-        data = json.loads(cleaned)
-        result = TriageResult(
-            should_respond=bool(data.get("should_respond", False)),
-            reason=str(data.get("reason", "")),
-            needs_search=bool(data.get("needs_search", False)),
-            is_image_question=bool(data.get("is_image_question", False)),
-        )
-        logger.info("Triage result: should_respond=%s, reason=%s", result.should_respond, result.reason)
-        return result
-    except (json.JSONDecodeError, AttributeError) as e:
-        # Last resort: regex extract individual fields from malformed JSON
-        logger.warning("Triage JSON parse failed, trying field extraction: %s", e)
-        should = re.search(r'"should_respond"\s*:\s*(true|false)', response, re.IGNORECASE)
-        reason = re.search(r'"reason"\s*:\s*"([^"]*)"', response)
-        search = re.search(r'"needs_search"\s*:\s*(true|false)', response, re.IGNORECASE)
-        image = re.search(r'"is_image_question"\s*:\s*(true|false)', response, re.IGNORECASE)
-
-        if should:
-            result = TriageResult(
-                should_respond=should.group(1).lower() == "true",
-                reason=reason.group(1) if reason else "",
-                needs_search=search.group(1).lower() == "true" if search else False,
-                is_image_question=image.group(1).lower() == "true" if image else False,
-            )
-            logger.info("Triage result (extracted): should_respond=%s, reason=%s", result.should_respond, result.reason)
-            return result
-
-        logger.warning("Triage could not extract fields from: %s", response[:200])
-        return TriageResult()
