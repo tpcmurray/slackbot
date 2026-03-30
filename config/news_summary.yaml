@@ -1,0 +1,30 @@
+digests:
+  - title: "AI/LLM News"
+    feeds:
+      - https://feeds.arstechnica.com/arstechnica/ai
+      - https://www.theverge.com/rss/ai-artificial-intelligence/index.xml
+      - https://blog.google/technology/ai/rss/
+      - https://openai.com/blog/rss.xml
+      - https://www.anthropic.com/feed
+      - https://huggingface.co/blog/feed.xml
+      - https://simonwillison.net/atom/everything/
+    relevance: |
+      I care most about:
+      - New model releases and benchmarks
+      - Open source LLM developments (especially quantization, local inference, small models)
+      - AI coding tools and developer productivity
+      - Context engineering, RAG, and retrieval techniques
+      - Anything llama.cpp, vLLM, or local inference related
+      I care less about:
+      - AI ethics opinion pieces without substance
+      - Enterprise SaaS AI product launches
+      - Regulatory news unless it's a major policy shift
+    max_articles: 5
+    post_time: "09:00"
+    timezone: "America/St_Johns"
+
+  # Example: add more digests by copying the block above
+  # - title: "Gaming News"
+  #   feeds: [...]
+  #   relevance: |
+  #     ...
