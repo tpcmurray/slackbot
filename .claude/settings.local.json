@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s http://localhost:8080/v1/chat/completions -H \"Content-Type: application/json\" -d \"{\"\"messages\"\":[{\"\"role\"\":\"\"system\"\",\"\"content\"\":\"\"You are Kibitz, a casual Discord bot. Reply in 1 sentence.\"\"},{\"\"role\"\":\"\"user\"\",\"\"content\"\":\"\"hey wassup?\"\"}],\"\"max_tokens\"\":4096,\"\"reasoning_effort\"\":\"\"low\"\"}\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); c=d[''''choices''''][0][''''message'''']; print\\(''''CONTENT:'''', repr\\(c.get\\(''''content'''',''''''''\\)[:300]\\)\\); print\\(''''REASONING:'''', repr\\(c.get\\(''''reasoning_content'''',''''''''\\)[:300]\\)\\)\")"
+    ]
+  }
+}

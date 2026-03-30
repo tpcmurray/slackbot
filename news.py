@@ -133,13 +133,14 @@ async def _rank_articles(articles: list[dict], relevance: str, max_articles: int
 
 async def run_news_digest(
     post_message: Callable[[str], Coroutine[Any, Any, Any]],
-    post_thread_reply: Callable[[str, str], Coroutine[Any, Any, None]],
+    post_thread_reply: Callable[..., Coroutine[Any, Any, None]],
 ) -> None:
     """Run all configured news digests.
 
     Args:
-        post_message: Async callable that posts a message and returns the message timestamp.
-        post_thread_reply: Async callable(thread_ts, text) that posts a threaded reply.
+        post_message: Async callable that posts a message and returns a parent reference
+                      (Discord Message object, Slack timestamp, etc.)
+        post_thread_reply: Async callable(parent_ref, text) that posts a threaded reply.
     """
     digests = _load_digests()
 
@@ -163,13 +164,13 @@ async def run_news_digest(
 
         # Post parent message
         today = datetime.now(timezone.utc).strftime("%B %d, %Y")
-        parent_ts = await post_message(f"\U0001f5de\ufe0f {title}, {today}")
+        parent = await post_message(f"\U0001f5de\ufe0f {title}, {today}")
 
-        if not parent_ts:
+        if not parent:
             logger.error("Failed to post parent message for digest: %s", title)
             continue
 
         # Post threaded replies
         for i, article in enumerate(ranked, 1):
             text = f"{i}. {article['description']}\n{article['url']}"
-            await post_thread_reply(parent_ts, text)
+            await post_thread_reply(parent, text)

@@ -5,7 +5,7 @@
 <h1 align="center">Kibitz</h1>
 
 <p align="center">
-  A Slack bot that passively reads the channel and autonomously decides when to chime in.<br>
+  A Discord bot that passively reads the channel and autonomously decides when to chime in.<br>
   Yiddish for an onlooker who offers unsolicited advice — literally what this bot does.
 </p>
 
@@ -16,7 +16,7 @@
 - **Python 3.11+**
 - **Docker** (for SearXNG)
 - **llama.cpp** with `--mmproj` support (for vision)
-- A **Slack workspace** you admin
+- A **Discord server** you admin
 
 ## Setup
 
@@ -29,30 +29,32 @@ pip install -r requirements.txt
 
 ### 2. Create your `.env`
 
-Copy the example and fill in your Slack tokens:
+Copy the example and fill in your Discord bot token:
 
 ```bash
 cp .env.example .env
 ```
 
 ```
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
+DISCORD_BOT_TOKEN=your-bot-token-here
 LLAMA_CPP_URL=http://localhost:8080
 SEARXNG_URL=http://localhost:8888
 BOT_NAME=kibitz
 CHANNEL_NAME=general
 ```
 
-### 3. Slack app setup
+### 3. Discord app setup
 
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app from scratch
-2. Enable **Socket Mode** and generate an App-Level Token (`connections:write`) — this is your `SLACK_APP_TOKEN`
-3. Add these **Bot Token Scopes** under OAuth & Permissions:
-   - `channels:history`, `channels:read`, `chat:write`, `files:read`, `files:write`, `reactions:read`, `users:read`
-4. Subscribe to the `message.channels` bot event
-5. Install the app to your workspace and copy the **Bot User OAuth Token** — this is your `SLACK_BOT_TOKEN`
-6. Invite the bot to your channel: `/invite @kibitz`
+1. Go to [discord.com/developers/applications](https://discord.com/developers/applications) and create a **New Application**
+2. Name it "Kibitz" and upload the icon from `docs/kibitz-icon.png`
+3. Go to the **Bot** tab:
+   - Copy the **Bot Token** — this is your `DISCORD_BOT_TOKEN`
+   - Enable **Message Content Intent** (required to read message text)
+   - Enable **Server Members Intent** (for username resolution)
+4. Go to **OAuth2 → URL Generator**:
+   - Scopes: `bot`
+   - Bot Permissions: `Send Messages`, `Read Message History`, `View Channels`, `Attach Files`, `Create Public Threads`
+   - Open the generated URL to invite the bot to your server
 
 ### 4. Start llama.cpp
 
@@ -84,7 +86,13 @@ curl http://localhost:8888/search?q=test&format=json
 python bot.py
 ```
 
-On startup the bot verifies that llama.cpp, SearXNG, and Slack are all reachable. If anything is down it will log the error and exit.
+Or use the all-in-one startup script:
+
+```powershell
+.\start.ps1
+```
+
+On startup the bot verifies that llama.cpp, SearXNG, and Discord are all reachable. If anything is down it will retry a few times then exit with a clear error.
 
 ## Configuration
 
@@ -100,7 +108,7 @@ All config files are re-read on use, so edits take effect without restarting the
 
 ## Architecture
 
-- **Slack** connects via Socket Mode (WebSocket, no public URL needed)
+- **Discord** connects via Gateway WebSocket (no public URL needed)
 - **LLM** is a local Qwen 3.5 9B via llama.cpp's OpenAI-compatible API
 - **Search** is self-hosted SearXNG in Docker
 - **Two-tier response**: cheap triage on every message, full generation only when warranted

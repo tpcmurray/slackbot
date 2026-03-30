@@ -1,13 +1,16 @@
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
+import discord
+
 from config import (
     BOT_NAME,
-    CHANNEL_NAME,
+    CHANNEL_NAMES,
     HEARTBEAT_PATH,
     PERSONALITY_PATH,
 )
@@ -80,8 +83,8 @@ def parse_heartbeat_file(path: str) -> list[HeartbeatTask]:
 
 
 class HeartbeatScheduler:
-    def __init__(self, slack_client, buffers: dict[str, MessageBuffer]):
-        self.slack_client = slack_client
+    def __init__(self, discord_client: discord.Client, buffers: dict[str, MessageBuffer]):
+        self.discord_client = discord_client
         self.buffers = buffers
         self.last_runs: dict[str, datetime] = {}
 
@@ -141,25 +144,26 @@ class HeartbeatScheduler:
 
     async def _run_news_digest(self):
         """Run the news digest and post to the channel."""
-        channel_id = await self._resolve_channel_id()
-        if not channel_id:
+        channel = self._find_channel()
+        if not channel:
             return
 
-        async def post_message(text: str) -> str | None:
+        async def post_message(text: str) -> discord.Message | None:
             try:
-                result = await self.slack_client.chat_postMessage(
-                    channel=channel_id, text=text
-                )
-                return result.get("ts")
+                msg = await channel.send(text)
+                return msg
             except Exception as e:
                 logger.error("Failed to post news digest message: %s", e)
                 return None
 
-        async def post_thread_reply(thread_ts: str, text: str):
+        async def post_thread_reply(parent_msg: discord.Message, text: str):
             try:
-                await self.slack_client.chat_postMessage(
-                    channel=channel_id, text=text, thread_ts=thread_ts
-                )
+                # Create a thread on the parent message if one doesn't exist yet
+                if not parent_msg.thread:
+                    thread = await parent_msg.create_thread(name="Articles")
+                else:
+                    thread = parent_msg.thread
+                await thread.send(text)
             except Exception as e:
                 logger.error("Failed to post news thread reply: %s", e)
 
@@ -167,14 +171,13 @@ class HeartbeatScheduler:
 
     async def _run_quiet_check(self, task: HeartbeatTask):
         """Check if the channel has been quiet and post a conversation starter."""
-        buf = self.buffers.get(CHANNEL_NAME)
+        buf = self.buffers.get(CHANNEL_NAMES[0])
 
         # If buffer exists and has recent messages, check timing
         if buf and buf.messages:
             last_msg = buf.messages[-1]
             try:
                 last_ts = float(last_msg.timestamp)
-                import time
                 hours_quiet = (time.time() - last_ts) / 3600
                 if hours_quiet < task.quiet_threshold_hours:
                     return  # Channel isn't quiet enough
@@ -185,43 +188,35 @@ class HeartbeatScheduler:
         try:
             personality = PERSONALITY_PATH.read_text(encoding="utf-8").replace("{BOT_NAME}", BOT_NAME)
         except FileNotFoundError:
-            personality = f"You are {BOT_NAME}, a witty Slack bot."
+            personality = f"You are {BOT_NAME}, a witty Discord bot."
 
         messages = [
             {"role": "system", "content": personality},
             {
                 "role": "user",
                 "content": (
-                    "The Slack channel has been quiet for a while. "
+                    "The Discord channel has been quiet for a while. "
                     "Post a casual conversation starter, observation, or light roast "
                     "to get things going. Keep it short and natural — don't be try-hard about it."
                 ),
             },
         ]
 
-        response = await chat_completion(messages, temperature=0.9, max_tokens=256)
+        response = await chat_completion(messages, temperature=0.9, max_tokens=512)
 
         if response:
-            channel_id = await self._resolve_channel_id()
-            if channel_id:
+            channel = self._find_channel()
+            if channel:
                 try:
-                    await self.slack_client.chat_postMessage(
-                        channel=channel_id, text=response
-                    )
+                    await channel.send(response)
                 except Exception as e:
                     logger.error("Failed to post quiet channel message: %s", e)
 
-    async def _resolve_channel_id(self) -> str | None:
-        """Resolve CHANNEL_NAME to a Slack channel ID."""
-        try:
-            result = await self.slack_client.conversations_list(
-                types="public_channel", limit=200
-            )
-            for ch in result.get("channels", []):
-                if ch["name"] == CHANNEL_NAME:
-                    return ch["id"]
-            logger.error("Channel #%s not found", CHANNEL_NAME)
-            return None
-        except Exception as e:
-            logger.error("Failed to resolve channel ID: %s", e)
-            return None
+    def _find_channel(self) -> discord.TextChannel | None:
+        """Find the target channel by name across all guilds."""
+        for guild in self.discord_client.guilds:
+            for channel in guild.text_channels:
+                if channel.name in CHANNEL_NAMES:
+                    return channel
+        logger.error("No channels from %s found", CHANNEL_NAMES)
+        return None

@@ -3,14 +3,12 @@ import logging
 import sys
 import time
 
-from slack_bolt.async_app import AsyncApp
-from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+import discord
 
 from config import (
-    SLACK_BOT_TOKEN,
-    SLACK_APP_TOKEN,
+    DISCORD_BOT_TOKEN,
     BOT_NAME,
-    CHANNEL_NAME,
+    CHANNEL_NAMES,
     PERSONALITY_PATH,
     HEARTBEAT_PATH,
     NEWS_SUMMARY_PATH,
@@ -18,9 +16,9 @@ from config import (
 from buffer import BufferedMessage, MessageBuffer
 from triage import run_triage
 from responder import generate_response
-from search import two_phase_response
-from vision import slack_image_to_base64
-from llm import chat_completion_vision, health_check as llm_health_check
+from search import two_phase_response, extract_urls, fetch_url_text
+from vision import image_to_base64
+from llm import chat_completion, chat_completion_vision, health_check as llm_health_check
 from search import health_check as search_health_check
 
 logging.basicConfig(
@@ -29,42 +27,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = AsyncApp(token=SLACK_BOT_TOKEN)
+# Discord intents
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
+client = discord.Client(intents=intents)
 
 # Per-channel message buffers
 buffers: dict[str, MessageBuffer] = {}
 # Track when the bot last spoke per channel
 last_response_time: dict[str, float] = {}
-# Cache user ID -> display name
-user_cache: dict[str, str] = {}
-# The bot's own user ID (resolved at startup)
-bot_user_id: str | None = None
 
 
-def get_buffer(channel: str) -> MessageBuffer:
-    if channel not in buffers:
-        buffers[channel] = MessageBuffer()
-    return buffers[channel]
-
-
-async def resolve_username(user_id: str) -> str:
-    """Resolve a Slack user ID to a display name, with caching."""
-    if user_id in user_cache:
-        return user_cache[user_id]
-
-    try:
-        result = await app.client.users_info(user=user_id)
-        name = (
-            result["user"].get("profile", {}).get("display_name")
-            or result["user"].get("real_name")
-            or result["user"].get("name")
-            or user_id
-        )
-        user_cache[user_id] = name
-        return name
-    except Exception as e:
-        logger.warning("Failed to resolve user %s: %s", user_id, e)
-        return user_id
+def get_buffer(channel_name: str) -> MessageBuffer:
+    if channel_name not in buffers:
+        buffers[channel_name] = MessageBuffer()
+    return buffers[channel_name]
 
 
 def _load_personality() -> str:
@@ -73,7 +52,7 @@ def _load_personality() -> str:
         text = PERSONALITY_PATH.read_text(encoding="utf-8")
         return text.replace("{BOT_NAME}", BOT_NAME)
     except FileNotFoundError:
-        return f"You are {BOT_NAME}, a witty Slack bot."
+        return f"You are {BOT_NAME}, a witty Discord bot."
 
 
 def _format_conversation(messages: list[BufferedMessage]) -> str:
@@ -86,48 +65,111 @@ def _format_conversation(messages: list[BufferedMessage]) -> str:
     return "\n".join(lines)
 
 
-@app.event("message")
-async def handle_message(event, say):
-    global bot_user_id
+def _buffer_bot_response(channel_name: str, text: str):
+    """Add the bot's own response to the buffer so it has context of what it said."""
+    buf = get_buffer(channel_name)
+    buf.add(BufferedMessage(
+        timestamp=str(time.time()),
+        user_id=str(client.user.id) if client.user else "bot",
+        username=BOT_NAME,
+        text=text,
+    ))
 
-    # Ignore bot's own messages
-    user_id = event.get("user", "")
-    if user_id == bot_user_id:
+
+@client.event
+async def on_ready():
+    logger.info("Logged in as %s (ID: %s)", client.user.name, client.user.id)
+
+    # Check target channel exists
+    found_channels = []
+    for guild in client.guilds:
+        for channel in guild.text_channels:
+            if channel.name in CHANNEL_NAMES:
+                found_channels.append(channel)
+
+    if not found_channels:
+        logger.error("STARTUP FAILED: None of channels %s found in any server", CHANNEL_NAMES)
+        await client.close()
         return
 
-    # Ignore message subtypes (edits, deletes, joins, etc.) except file_share
-    subtype = event.get("subtype")
-    if subtype and subtype != "file_share":
+    for ch in found_channels:
+        logger.info("Listening in #%s (guild: %s)", ch.name, ch.guild.name)
+
+    # Backfill message buffers with recent channel history
+    for ch in found_channels:
+        try:
+            history = []
+            async for msg in ch.history(limit=50):
+                history.append(msg)
+            history.reverse()  # oldest first
+            buf = get_buffer(ch.name)
+            for msg in history:
+                has_image = any(a.content_type and a.content_type.startswith("image/") for a in msg.attachments)
+                buf.add(BufferedMessage(
+                    timestamp=str(msg.created_at.timestamp()),
+                    user_id=str(msg.author.id),
+                    username=msg.author.display_name,
+                    text=msg.content or "",
+                    has_image=has_image,
+                    image_urls=[a.url for a in msg.attachments if a.content_type and a.content_type.startswith("image/")],
+                    thread_ts=str(msg.reference.message_id) if msg.reference else None,
+                ))
+            logger.info("Backfilled %d messages from #%s", len(history), ch.name)
+        except Exception as e:
+            logger.warning("Failed to backfill history for #%s: %s", ch.name, e)
+
+    # Start heartbeat scheduler
+    from heartbeat import HeartbeatScheduler
+    scheduler = HeartbeatScheduler(client, buffers)
+    client.loop.create_task(scheduler.run_loop())
+    logger.info("Heartbeat scheduler started")
+    logger.info("Kibitz is online.")
+
+
+@client.event
+async def on_message(message: discord.Message):
+    # Ignore the bot's own messages
+    if message.author == client.user:
         return
 
-    channel = event.get("channel", "")
-    text = event.get("text", "")
-    ts = event.get("ts", "")
-    thread_ts = event.get("thread_ts")
+    # Ignore DMs
+    if not message.guild:
+        return
 
-    # Resolve username
-    username = await resolve_username(user_id)
+    # Only respond in the target channel
+    if message.channel.name not in CHANNEL_NAMES:
+        return
+
+    channel_name = message.channel.name
+    text = message.content
+    ts = str(message.created_at.timestamp())
+    username = message.author.display_name
 
     # Check for images
-    files = event.get("files", [])
-    image_files = [f for f in files if f.get("mimetype", "").startswith("image/")]
-    has_image = len(image_files) > 0
-    image_urls = [f.get("url_private_download", "") for f in image_files if f.get("url_private_download")]
+    image_attachments = [a for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
+    has_image = len(image_attachments) > 0
+    image_urls = [a.url for a in image_attachments]
+
+    # Check for Discord mention
+    mentioned = client.user.mentioned_in(message)
+    # Also check for name mention in text
+    if BOT_NAME.lower() in text.lower():
+        mentioned = True
 
     # Buffer the message
-    buf = get_buffer(channel)
+    buf = get_buffer(channel_name)
     buf.add(BufferedMessage(
         timestamp=ts,
-        user_id=user_id,
+        user_id=str(message.author.id),
         username=username,
         text=text,
         has_image=has_image,
         image_urls=image_urls,
-        thread_ts=thread_ts,
+        thread_ts=str(message.reference.message_id) if message.reference else None,
     ))
 
     # Run triage
-    seconds_ago = time.time() - last_response_time.get(channel, 0)
+    seconds_ago = time.time() - last_response_time.get(channel_name, 0)
     triage_result = await run_triage(buf.recent(10), seconds_ago)
 
     if not triage_result.should_respond:
@@ -137,7 +179,7 @@ async def handle_message(event, say):
 
     # Handle image questions
     if triage_result.is_image_question and image_urls:
-        image_b64 = await slack_image_to_base64(image_urls[0])
+        image_b64 = await image_to_base64(image_urls[0])
         if image_b64:
             personality = _load_personality()
             response = await chat_completion_vision(
@@ -146,8 +188,44 @@ async def handle_message(event, say):
                 system_prompt=personality,
             )
             if response:
-                await say(response)
-                last_response_time[channel] = time.time()
+                await message.channel.send(response)
+                _buffer_bot_response(channel_name, response)
+                last_response_time[channel_name] = time.time()
+            return
+
+    # If the message contains URLs, fetch their content and include in the prompt
+    urls = extract_urls(text)
+    if urls:
+        url_contents = []
+        for url in urls[:2]:  # max 2 URLs
+            content = await fetch_url_text(url)
+            if content:
+                url_contents.append(f"[Content from {url}]:\n{content}")
+        if url_contents:
+            personality = _load_personality()
+            url_context = "\n\n".join(url_contents)
+            messages = [
+                {"role": "system", "content": personality},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Someone said: {text}\n\n"
+                        f"Here is the content from the URL(s) they shared:\n{url_context}\n\n"
+                        "Summarize the article in a few paragraphs. Cover the key points, "
+                        "main arguments, and any notable details. Keep your personality "
+                        "but be thorough — this is a summary, not a one-liner."
+                    ),
+                },
+            ]
+            response = await chat_completion(messages)
+            if response:
+                try:
+                    for i in range(0, len(response), 2000):
+                        await message.channel.send(response[i:i+2000])
+                    _buffer_bot_response(channel_name, response)
+                    last_response_time[channel_name] = time.time()
+                except discord.HTTPException as e:
+                    logger.error("Failed to send URL response: %s", e)
             return
 
     # Handle factual/search questions
@@ -156,17 +234,32 @@ async def handle_message(event, say):
         conversation = _format_conversation(buf.recent(10))
 
         async def post(msg: str):
-            await say(msg)
-            last_response_time[channel] = time.time()
+            try:
+                for i in range(0, len(msg), 2000):
+                    await message.channel.send(msg[i:i+2000])
+                _buffer_bot_response(channel_name, msg)
+                last_response_time[channel_name] = time.time()
+            except discord.HTTPException as e:
+                logger.error("Failed to send search response: %s", e)
 
         await two_phase_response(text, conversation, personality, post)
         return
 
     # Standard personality-driven response
-    response = await generate_response(buf.full_context())
+    response = await generate_response(buf.recent(15))
     if response:
-        await say(response)
-        last_response_time[channel] = time.time()
+        logger.info("Sending response (%d chars): %s", len(response), response[:100])
+        try:
+            for i in range(0, len(response), 2000):
+                await message.channel.send(response[i:i+2000])
+            _buffer_bot_response(channel_name, response)
+            last_response_time[channel_name] = time.time()
+        except discord.Forbidden:
+            logger.error("Bot lacks permission to send messages in #%s", channel_name)
+        except discord.HTTPException as e:
+            logger.error("Failed to send message: %s", e)
+    else:
+        logger.warning("Responder returned empty response")
 
 
 async def _wait_for_service(name: str, check_fn, retries: int = 10, delay: float = 3.0) -> bool:
@@ -207,50 +300,11 @@ async def startup_checks() -> bool:
 
 
 async def main():
-    global bot_user_id
-
-    # Run startup checks
+    # Run startup checks before connecting to Discord
     if not await startup_checks():
         sys.exit(1)
 
-    # Resolve the bot's own user ID
-    try:
-        auth = await app.client.auth_test()
-        bot_user_id = auth["user_id"]
-        logger.info("Bot user ID: %s", bot_user_id)
-    except Exception as e:
-        logger.error("Failed to authenticate with Slack: %s", e)
-        sys.exit(1)
-
-    # Check the bot is in the target channel
-    try:
-        result = await app.client.conversations_list(types="public_channel", limit=200)
-        channels = result.get("channels", [])
-        target = next((c for c in channels if c["name"] == CHANNEL_NAME), None)
-
-        if not target:
-            logger.error("STARTUP FAILED: Channel #%s not found", CHANNEL_NAME)
-            sys.exit(1)
-
-        if not target.get("is_member", False):
-            logger.error("STARTUP FAILED: Bot is not a member of #%s — use /invite @%s", CHANNEL_NAME, BOT_NAME)
-            sys.exit(1)
-
-        logger.info("Bot is in #%s", CHANNEL_NAME)
-    except Exception as e:
-        logger.error("Failed to check channel membership: %s", e)
-        sys.exit(1)
-
-    # Start heartbeat scheduler
-    from heartbeat import HeartbeatScheduler
-    scheduler = HeartbeatScheduler(app.client, buffers)
-    asyncio.create_task(scheduler.run_loop())
-    logger.info("Heartbeat scheduler started")
-
-    # Start socket mode
-    handler = AsyncSocketModeHandler(app, SLACK_APP_TOKEN)
-    logger.info("Kibitz is online.")
-    await handler.start_async()
+    await client.start(DISCORD_BOT_TOKEN)
 
 
 if __name__ == "__main__":

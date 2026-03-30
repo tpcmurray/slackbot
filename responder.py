@@ -14,7 +14,7 @@ def _load_personality() -> str:
         return text.replace("{BOT_NAME}", BOT_NAME)
     except FileNotFoundError:
         logger.error("personality.md not found at %s", PERSONALITY_PATH)
-        return f"You are {BOT_NAME}, a witty Slack bot."
+        return f"You are {BOT_NAME}, a witty Discord bot."
 
 
 def _format_conversation(messages: list[BufferedMessage]) -> str:
@@ -30,7 +30,7 @@ def _format_conversation(messages: list[BufferedMessage]) -> str:
 async def generate_response(
     full_context: list[BufferedMessage],
     temperature: float = 0.7,
-    max_tokens: int = 512,
+    max_tokens: int = 1024,
 ) -> str:
     """Tier 2: Generate a personality-driven response using the full message buffer."""
     personality = _load_personality()
@@ -41,9 +41,8 @@ async def generate_response(
         {
             "role": "user",
             "content": (
-                "Here is the recent conversation in the Slack channel. "
-                "Write your next message as a natural reply. Do not include your name prefix.\n\n"
-                f"{conversation}"
+                f"Recent chat:\n{conversation}\n\n"
+                "Reply as your next message. One or two sentences max. No name prefix."
             ),
         },
     ]

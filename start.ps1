@@ -9,8 +9,8 @@ $ProjectRoot = $PSScriptRoot
 
 # ── Configuration ──────────────────────────────────────────
 $LlamaServerExe  = "C:\llama.cpp\llama-server.exe"
-$ModelPath        = "C:\models\qwopus-9b-v2\Qwen3.5-9B.Q8_0.gguf"
-$MmprojPath       = "C:\models\qwopus-9b-v2\mmproj-BF16.gguf"
+$ModelPath        = "C:\models\qwen3.5-9b-q8\Qwen3.5-9B.Q8_0.gguf"
+$MmprojPath       = "C:\models\qwen3.5-9b-q8\mmproj-BF16.gguf"
 $LlamaPort        = 8080
 $LlamaContextSize = 8192
 $LlamaGpuLayers   = 99
@@ -41,21 +41,18 @@ $envExample = Join-Path $ProjectRoot ".env.example"
 if (-not (Test-Path $envFile)) {
     if (Test-Path $envExample) {
         Copy-Item $envExample $envFile
-        Write-Warn ".env created from .env.example — edit it with your Slack tokens before the bot can connect."
+        Write-Warn ".env created from .env.example — edit it with your Discord bot token before the bot can connect."
     } else {
         Write-Fail ".env.example not found. Cannot create .env."
         exit 1
     }
 }
 
-# Validate that tokens are filled in (not still placeholders)
+# Validate that the token is filled in (not still placeholder)
 $envContent = Get-Content $envFile -Raw
-$missingTokens = @()
-if ($envContent -match "SLACK_BOT_TOKEN=xoxb-\.\.\.") { $missingTokens += "SLACK_BOT_TOKEN" }
-if ($envContent -match "SLACK_APP_TOKEN=xapp-\.\.\.") { $missingTokens += "SLACK_APP_TOKEN" }
-if ($missingTokens.Count -gt 0) {
-    Write-Warn "Placeholder tokens detected in .env: $($missingTokens -join ', ')"
-    Write-Warn "The bot won't connect to Slack until you fill these in."
+if ($envContent -match "DISCORD_BOT_TOKEN=your-bot-token-here") {
+    Write-Warn "Placeholder token detected in .env: DISCORD_BOT_TOKEN"
+    Write-Warn "The bot won't connect to Discord until you fill this in."
 }
 
 Write-Ok ".env file exists."
@@ -69,7 +66,7 @@ if (-not (Test-Path $reqFile)) {
 }
 
 # Quick check: try importing the heaviest dependency
-$pipCheck = & python -c "import slack_bolt" 2>&1
+$pipCheck = & python -c "import discord" 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Status "Installing Python dependencies..."
     & pip install -r $reqFile
@@ -151,7 +148,9 @@ if (Test-TcpPort $LlamaPort) {
         "--port", $LlamaPort,
         "--host", "127.0.0.1",
         "-c", $LlamaContextSize,
-        "-ngl", $LlamaGpuLayers
+        "-ngl", $LlamaGpuLayers,
+        "--jinja",
+        "-fa", "on"
     )
     if ($MmprojPath -and (Test-Path $MmprojPath)) {
         $llamaArgs += @("--mmproj", $MmprojPath)
