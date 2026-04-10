@@ -162,10 +162,16 @@ async def on_message(message: discord.Message):
     ts = str(message.created_at.timestamp())
     username = message.author.display_name
 
-    # Check for images
+    # Check for images (attachments + embeds)
     image_attachments = [a for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
-    has_image = len(image_attachments) > 0
     image_urls = [a.url for a in image_attachments]
+    # Discord also puts pasted/linked images in embeds
+    for embed in message.embeds:
+        if embed.image and embed.image.url:
+            image_urls.append(embed.image.url)
+        if embed.thumbnail and embed.thumbnail.url:
+            image_urls.append(embed.thumbnail.url)
+    has_image = len(image_urls) > 0
 
     # Check for name mention (Discord @mention or text mention)
     mentioned = client.user.mentioned_in(message) or BOT_NAME.lower() in text.lower()
@@ -207,6 +213,29 @@ async def on_message(message: discord.Message):
         image_b64 = await image_to_base64(image_urls[0])
         if image_b64:
             personality = _load_personality()
+            # First, get a detailed description to store for follow-up context
+            detailed = await chat_completion_vision(
+                text=(
+                    "Describe this image in thorough detail. Include all visible text, "
+                    "labels, names, locations, and any other specifics. "
+                    "This description will be used to answer follow-up questions, "
+                    "so be exhaustive and accurate. Do not make anything up."
+                ),
+                image_base64=image_b64,
+                system_prompt="You are a precise image describer. List everything you see.",
+                max_tokens=4096,
+            )
+            # Store the detailed description in the buffer for follow-ups
+            if detailed:
+                buf.add(BufferedMessage(
+                    timestamp=str(time.time()),
+                    user_id=str(client.user.id) if client.user else "bot",
+                    username=f"{BOT_NAME} (image analysis)",
+                    text=f"[Detailed image description: {detailed}]",
+                ))
+                logger.info("Stored image description (%d chars) in buffer", len(detailed))
+
+            # Now generate the user-facing response with personality
             response = await chat_completion_vision(
                 text=text or "What's in this image?",
                 image_base64=image_b64,

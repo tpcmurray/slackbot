@@ -45,7 +45,6 @@ async def chat_completion(
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "chat_template_kwargs": {"enable_thinking": False},
     }
 
     for attempt in range(1, _retries + 1):

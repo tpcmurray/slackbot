@@ -13,7 +13,7 @@ _SEARCH_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 _IMAGE_PATTERNS = re.compile(
-    r"\b(what('s| is) (this|that|in this) (image|picture|photo|pic)|describe (this|the) (image|picture|photo)|what do you see)\b",
+    r"\b(what('s| is) (this|that|in this)|describe|summarize|analyze|explain|look at|check .* out|can you see|this (image|picture|photo|pic))\b",
     re.IGNORECASE,
 )
 _CHANNEL_PATTERN = re.compile(
@@ -57,8 +57,28 @@ def run_triage(
     # Detect search intent
     needs_search = bool(_SEARCH_PATTERNS.search(text))
 
-    # Detect image question
-    is_image_question = has_image and bool(_IMAGE_PATTERNS.search(text))
+    # Detect image question — if an image is attached and the message asks
+    # anything question-like, treat it as an image question
+    is_image_question = has_image and (
+        bool(_IMAGE_PATTERNS.search(text))
+        or text.strip().endswith("?")
+        or "what" in text.lower()
+    )
+
+    # Image questions take priority over search
+    if is_image_question:
+        needs_search = False
+
+    # If there's a recent image description in the buffer, suppress search —
+    # the user is likely asking about the image, not the internet
+    if needs_search:
+        has_recent_image_context = any(
+            "[Detailed image description:" in m.text
+            for m in recent_messages
+        )
+        if has_recent_image_context:
+            needs_search = False
+            reason += " (image context available, skipping search)"
 
     reason = "name mentioned"
     if needs_search:

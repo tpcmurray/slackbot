@@ -9,8 +9,8 @@ $ProjectRoot = $PSScriptRoot
 
 # ── Configuration ──────────────────────────────────────────
 $LlamaServerExe  = "C:\llama.cpp\llama-server.exe"
-$ModelPath        = "C:\models\qwen3.5-9b-q8\Qwen3.5-9B.Q8_0.gguf"
-$MmprojPath       = "C:\models\qwen3.5-9b-q8\mmproj-BF16.gguf"
+$ModelPath        = "C:\models\gemma4\gemma-4-E4B-it-Q8_0.gguf"
+$MmprojPath       = "C:\models\gemma4\mmproj-BF16.gguf"
 $LlamaPort        = 8080
 $LlamaContextSize = 8192
 $LlamaGpuLayers   = 99
@@ -150,7 +150,10 @@ if (Test-TcpPort $LlamaPort) {
         "-c", $LlamaContextSize,
         "-ngl", $LlamaGpuLayers,
         "--jinja",
-        "-fa", "on"
+        "-fa", "on",
+        "--temp", "1.0",
+        "--top-p", "0.95",
+        "--top-k", "64"
     )
     if ($MmprojPath -and (Test-Path $MmprojPath)) {
         $llamaArgs += @("--mmproj", $MmprojPath)
